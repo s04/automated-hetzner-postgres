@@ -47,10 +47,9 @@ terraform apply
 
 After the infrastructure has been provisioned, return to the root directory and use Ansible to configure the PostgreSQL server. Ensure the `inventory.ini` file contains the correct IP address and SSH details of the newly created server.
 
-Run the Ansible playbook:
+Run the Ansible playbook (back to root of project):
 
 ```bash
-cd ..
 ansible-playbook -i inventory.ini playbook.yaml
 ```
 
