@@ -1,0 +1,168 @@
+---
+- hosts: all
+  become: yes
+  vars:
+    postgres_db: "{{ lookup('community.general.env', 'POSTGRES_DB') }}"
+    postgres_user: "{{ lookup('community.general.env', 'POSTGRES_USER') }}"
+    postgres_password: "{{ lookup('community.general.env', 'POSTGRES_PASSWORD') }}"
+    postgres_internal_port: 5432
+    postgres_external_port: 54321
+    postgres_data_dir: "/var/lib/postgresql/data"
+    postgres_init_dir: "/docker-entrypoint-initdb.d"
+    keep_existing_data: false  # Set this to true if you want to keep existing data
+  tasks:
+    - name: Update and upgrade apt packages
+      apt:
+        update_cache: yes
+        upgrade: dist
+
+    - name: Remove conflicting Docker and container-related packages
+      apt:
+        name:
+          - docker.io
+          - docker-doc
+          - docker-compose
+          - docker-compose-v2
+          - podman-docker
+          - containerd
+          - runc
+        state: absent
+
+    - name: Run shell commands to add Docker's official GPG key and repository
+      shell: |
+        apt-get update
+        apt-get install -y ca-certificates curl
+        install -m 0755 -d /etc/apt/keyrings
+        curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc
+        chmod a+r /etc/apt/keyrings/docker.asc
+        echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu $(. /etc/os-release && echo "$VERSION_CODENAME") stable" | tee /etc/apt/sources.list.d/docker.list > /dev/null
+        apt-get update
+
+    - name: Install Docker packages
+      apt:
+        name:
+          - docker-ce
+          - docker-ce-cli
+          - containerd.io
+          - docker-buildx-plugin
+          - docker-compose-plugin
+        state: present
+
+    - name: Create Docker network
+      docker_network:
+        name: postgres_network
+
+    - name: Check if PostgreSQL data directory is empty
+      find:
+        paths: "{{ postgres_data_dir }}"
+        file_type: any
+      register: postgres_data_files
+
+    - name: Clear PostgreSQL data directory if starting fresh
+      file:
+        path: "{{ postgres_data_dir }}"
+        state: absent
+      when: not keep_existing_data and postgres_data_files.matched > 0
+
+    - name: Recreate empty PostgreSQL data directory if starting fresh
+      file:
+        path: "{{ postgres_data_dir }}"
+        state: directory
+        mode: '0700'
+        owner: "1000"  # This is typically the UID for the postgres user in the container
+        group: "1000"
+      when: not keep_existing_data
+
+    - name: Run PostgreSQL container
+      docker_container:
+        name: postgres
+        image: postgres:16
+        state: started
+        restart_policy: always
+        networks:
+          - name: postgres_network
+        env:
+          POSTGRES_DB: "{{ postgres_db }}"
+          POSTGRES_USER: "{{ postgres_user }}"
+          POSTGRES_PASSWORD: "{{ postgres_password }}"
+          POSTGRES_HOST_AUTH_METHOD: "md5"
+        ports:
+          - "0.0.0.0:{{ postgres_external_port }}:{{ postgres_internal_port }}"
+        volumes:
+          - "{{ postgres_data_dir }}:/var/lib/postgresql/data"
+          - "{{ postgres_init_dir }}:/docker-entrypoint-initdb.d"
+        command: 
+          - "postgres"
+          - "-c"
+          - "listen_addresses=*"
+
+    - name: Install UFW
+      apt:
+        name: ufw
+        state: present
+
+    - name: Allow SSH through UFW
+      ufw:
+        rule: allow
+        port: "22"
+        proto: tcp
+
+    - name: Allow custom PostgreSQL port through UFW
+      ufw:
+        rule: allow
+        port: "{{ postgres_external_port }}"
+        proto: tcp
+
+    - name: Enable UFW
+      ufw:
+        state: enabled
+        policy: deny
+
+    - name: Install fail2ban
+      apt:
+        name: fail2ban
+        state: present
+
+    - name: Start and enable fail2ban
+      systemd:
+        name: fail2ban
+        state: started
+        enabled: yes
+
+    - name: Set up daily PostgreSQL backups
+      cron:
+        name: "Daily PostgreSQL backup"
+        minute: "0"
+        hour: "1"
+        user: root
+        job: "docker exec postgres pg_dumpall -U {{ postgres_user }} > {{ postgres_data_dir }}/backups/postgres_$(date +\\%Y\\%m\\%d).sql"
+
+    - name: Rotate PostgreSQL backups
+      cron:
+        name: "Rotate PostgreSQL backups"
+        minute: "30"
+        hour: "1"
+        user: root
+        job: "find {{ postgres_data_dir }}/backups -name 'postgres_*.sql' -mtime +7 -delete"
+
+    - name: Disable SSH password authentication
+      lineinfile:
+        path: /etc/ssh/sshd_config
+        regexp: '^#?PasswordAuthentication'
+        line: 'PasswordAuthentication no'
+      notify: Restart SSH
+
+    - name: Determine SSH service name
+      command: systemctl list-unit-files --type=service
+      register: service_list
+      changed_when: false
+
+    - name: Set SSH service fact
+      set_fact:
+        ssh_service_name: "{{ 'ssh' if 'ssh.service' in service_list.stdout else 'sshd' }}"
+
+  handlers:
+    - name: Restart SSH
+      service:
+        name: "{{ ssh_service_name }}"
+        state: restarted
