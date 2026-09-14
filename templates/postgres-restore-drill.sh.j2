@@ -1,0 +1,41 @@
+#!/usr/bin/env bash
+# Restore S3 into a disposable directory/container; never mount the live data directory.
+set -Eeuo pipefail
+umask 077
+export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+image=$(docker inspect --format '{% raw %}{{.Config.Image}}{% endraw %}' postgres)
+db_user=$(docker exec postgres printenv POSTGRES_USER)
+uid=$(docker exec postgres id -u postgres)
+scratch=$(mktemp -d /var/backups/postgresql/restore-drill-XXXXXXXX)
+name="postgres-restore-${scratch##*-}"
+cleanup() {
+  docker rm -fv "$name" >/dev/null 2>&1 || true
+  rm -rf -- "$scratch"
+}
+trap cleanup EXIT
+chown "$uid" "$scratch"
+restore_options=(--type=immediate --target-action=promote)
+if [ "$#" -gt 0 ]; then
+  restore_options=(--type=time --target="$1" --target-action=promote)
+fi
+docker run --rm --user postgres --network postgres_network \
+  -v "$scratch:/var/lib/postgresql/data" -v /etc/pgbackrest:/etc/pgbackrest:ro \
+  --entrypoint pgbackrest "$image" --stanza=main "${restore_options[@]}" restore
+# No TCP listener or published ports; the recovered cluster must not archive to production.
+docker run -d --name "$name" --network postgres_network \
+  -e PGDATA=/var/lib/postgresql/data \
+  -v "$scratch:/var/lib/postgresql/data" -v /etc/pgbackrest:/etc/pgbackrest:ro \
+  "$image" postgres -c archive_mode=off -c listen_addresses='' >/dev/null
+for attempt in $(seq 1 {{ postgres_ready_timeout | int }}); do
+  recovered=$(docker exec "$name" psql -XAt -U "$db_user" -d postgres \
+    -c 'SELECT NOT pg_is_in_recovery()' 2>/dev/null || true)
+  if [ "$recovered" = t ]; then
+    docker exec "$name" psql -X -v ON_ERROR_STOP=1 -U "$db_user" \
+      -d "${RESTORE_CHECK_DB:-postgres}" -c "${RESTORE_CHECK_SQL:-SELECT datname FROM pg_database}"
+    echo 'Restore drill passed; disposable database will now be removed.'
+    exit 0
+  fi
+  sleep 1
+done
+docker logs --tail 50 "$name" >&2
+exit 1

@@ -1,0 +1,23 @@
+[global]
+repo1-type=s3
+repo1-path={{ postgres_s3_prefix }}
+repo1-s3-bucket={{ postgres_s3_bucket }}
+repo1-s3-endpoint={{ postgres_s3_endpoint }}
+repo1-s3-region={{ postgres_s3_region }}
+repo1-s3-key={{ postgres_s3_access_key }}
+repo1-s3-key-secret={{ postgres_s3_secret_key }}
+repo1-s3-uri-style={{ postgres_s3_uri_style }}
+repo1-storage-port={{ postgres_s3_port }}
+repo1-storage-verify-tls={{ 'y' if postgres_s3_verify_tls | bool else 'n' }}
+repo1-retention-full={{ postgres_s3_retention_full }}
+process-max={{ postgres_pgbackrest_process_max }}
+start-fast=y
+compress-type=gz
+log-level-console=info
+log-level-file=off
+lock-path=/tmp/pgbackrest
+
+[main]
+pg1-path=/var/lib/postgresql/data
+pg1-user={{ postgres_user }}
+pg1-socket-path=/var/run/postgresql

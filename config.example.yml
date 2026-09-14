@@ -1,0 +1,13 @@
+---
+# Copy to config.yml (ignored by Git). Make targets load it automatically.
+postgres_major_version: "16"
+postgres_autotune: true
+postgres_max_connections: 100
+
+# Enable after creating a private S3-compatible bucket and exporting credentials.
+postgres_s3_backup_enabled: false
+# postgres_s3_bucket: my-postgres-backups
+# postgres_s3_endpoint: fsn1.your-objectstorage.com
+# postgres_s3_region: fsn1
+# postgres_s3_prefix: /my-postgres-server
+# Credentials come from S3_ACCESS_KEY_ID and S3_SECRET_ACCESS_KEY, or Ansible Vault.

@@ -1,0 +1,25 @@
+---
+- name: Refuse recovery while a PostgreSQL container exists
+  ansible.builtin.assert:
+    that:
+      - not postgres_current_container.exists
+    fail_msg: Recovery requires a new destination without an existing PostgreSQL container.
+
+- name: Set empty recovery directory ownership from the image
+  ansible.builtin.file:
+    path: "{{ postgres_data_dir }}"
+    state: directory
+    owner: "{{ postgres_image_uid.stdout }}"
+    mode: "0700"
+
+- name: Restore physical backup and configure WAL recovery
+  ansible.builtin.command:
+    argv: >-
+      {{ ['docker', 'run', '--rm', '--user', 'postgres', '--network', 'postgres_network',
+          '-v', postgres_data_dir ~ ':/var/lib/postgresql/data',
+          '-v', '/etc/pgbackrest:/etc/pgbackrest:ro', '--entrypoint', 'pgbackrest',
+          'local/postgres-backrest:' ~ postgres_major_version, '--stanza=main']
+      + (['--type=time', '--target=' ~ postgres_restore_target, '--target-action=promote']
+          if postgres_restore_target | length > 0 else [])
+      + ['restore'] }}
+  changed_when: true

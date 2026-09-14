@@ -4,3 +4,15 @@
 *.tfstate
 *.tfstate.*
 *.backup
+
+.DS_Store
+.venv/
+__pycache__/
+.env
+.env.*
+*.tfplan
+inventory.local.ini
+config.yml
+backup.generated.yml
+backup.generated.yml.tmp
+*.tfvars.json

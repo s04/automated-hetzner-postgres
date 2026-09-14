@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+umask 077
+export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+backup_dir={{ postgres_backup_dir | quote }}
+exec 9>"$backup_dir/.backup.lock"
+flock -n 9 || exit 0
+partial=$(mktemp "$backup_dir/.postgres-XXXXXX.sql.gz")
+trap 'rm -f "$partial"' EXIT
+# Read the initialized container's user, avoiding credentials in cron or process args.
+docker exec postgres sh -c 'exec pg_dumpall -U "$POSTGRES_USER"' | gzip > "$partial"
+gzip -t "$partial"
+backup="$backup_dir/postgres-$(date -u +%Y%m%dT%H%M%S).sql.gz"
+mv "$partial" "$backup"
+# Only prune after a successful backup; incomplete dumps never replace good ones.
+find "$backup_dir" -maxdepth 1 -type f -name 'postgres-*.sql.gz' -mtime +{{ postgres_backup_retention_days | int }} -delete
+printf 'Backup written: %s\n' "$backup"

@@ -1,0 +1,6 @@
+# Optional: defaults create a uniquely named private bucket in Falkenstein.
+s3_endpoint = "fsn1.your-objectstorage.com"
+s3_region   = "fsn1"
+# bucket_name = "your-globally-unique-backup-bucket"
+backup_prefix = "/postgres"
+# Credentials belong in the environment, never in this file.

@@ -1,0 +1,33 @@
+name: Validate
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+  schedule:
+    - cron: '17 8 * * 1'
+permissions:
+  contents: read
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.10.5
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: requirements-dev.txt
+      - run: pip install -r requirements-dev.txt
+      - run: ansible-galaxy collection install -r requirements.yml
+      - run: terraform -chdir=terraform fmt -check -recursive
+      - run: terraform -chdir=terraform init -backend=false -input=false
+      - run: terraform -chdir=terraform validate
+      - run: terraform -chdir=terraform/object-storage init -backend=false -input=false
+      - run: terraform -chdir=terraform/object-storage validate
+      - run: ansible-lint playbook.yaml operations.yml tasks/*.yml
+      - run: ansible-playbook -i inventory.ini playbook.yaml --syntax-check
+      - run: python -m unittest discover -s tests -v

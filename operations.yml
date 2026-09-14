@@ -1,0 +1,60 @@
+---
+- name: Operate PostgreSQL without reconfiguring it
+  hosts: postgres_servers
+  become: true
+  gather_facts: false
+  tasks:
+    - name: Validate operation
+      ansible.builtin.assert:
+        that:
+          - operation | default('status') in ['status', 'backup', 's3-backup', 'restore-drill', 'upgrade-backup']
+
+    - name: Show database and backup status
+      ansible.builtin.shell: |
+        set -euo pipefail
+        docker ps --filter name=postgres --format 'table {% raw %}{{.Names}}\t{{.Status}}{% endraw %}'
+        df -h /var/lib/postgresql/data /var/backups/postgresql
+        docker exec postgres sh -c '
+          psql -X -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c "
+            SELECT archived_count, failed_count, last_archived_time, last_failed_time FROM pg_stat_archiver"
+        '
+        if docker exec postgres test -f /etc/pgbackrest/pgbackrest.conf; then
+          docker exec --user postgres postgres pgbackrest --stanza=main info
+        fi
+        find /var/backups/postgresql -maxdepth 1 -name 'postgres-*.sql.gz' -printf '%TY-%Tm-%Td %TH:%TM %f\n' | sort | tail -5
+      args:
+        executable: /bin/bash
+      changed_when: false
+      register: postgres_status
+      when: operation | default('status') == 'status'
+
+    - name: Print status
+      ansible.builtin.debug:
+        var: postgres_status.stdout_lines
+      when: operation | default('status') == 'status'
+
+    - name: Take local SQL backup
+      ansible.builtin.command: /usr/local/sbin/postgres-backup
+      changed_when: true
+      when: operation | default('status') in ['backup', 'upgrade-backup']
+
+    - name: Take S3 differential backup
+      ansible.builtin.command: /usr/local/sbin/postgres-s3-backup diff
+      changed_when: true
+      when: operation | default('status') == 's3-backup'
+
+    - name: Back up to S3 before upgrading when configured
+      ansible.builtin.shell: |
+        set -euo pipefail
+        if docker exec postgres test -f /etc/pgbackrest/pgbackrest.conf; then
+          /usr/local/sbin/postgres-s3-backup diff
+        fi
+      args:
+        executable: /bin/bash
+      changed_when: true
+      when: operation | default('status') == 'upgrade-backup'
+
+    - name: Restore S3 backup into disposable database and clean up
+      ansible.builtin.command: /usr/local/sbin/postgres-restore-drill
+      changed_when: true
+      when: operation | default('status') == 'restore-drill'

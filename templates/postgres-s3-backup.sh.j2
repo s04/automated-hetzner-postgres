@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+umask 077
+export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+case "${1:-diff}" in
+  full|diff|incr) backup_type="${1:-diff}" ;;
+  *) echo 'Usage: postgres-s3-backup [full|diff|incr]' >&2; exit 2 ;;
+esac
+# pgBackRest handles repository retention and coordinates with continuous archiving.
+exec docker exec --user postgres postgres pgbackrest --stanza=main --type="$backup_type" backup

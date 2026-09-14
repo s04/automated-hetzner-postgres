@@ -1,2 +1,7 @@
-hcloud_token = "your-hetzner-api-token-here"
-allowed_cidr = "203.0.113.0/24" # Replace with your IP/CIDR
+# Authenticate with HCLOUD_TOKEN rather than storing the token here.
+allowed_cidr        = "203.0.113.5/32" # Replace with your public IP /32.
+ssh_public_key_path = "~/.ssh/id_ed25519.pub"
+server_name         = "postgres-server"
+server_type         = "cx23"
+location            = "nbg1"
+server_backups      = false # Optional, incurs additional Hetzner charges.

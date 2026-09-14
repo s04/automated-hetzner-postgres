@@ -1,0 +1,46 @@
+---
+- name: Create backup image build directory
+  ansible.builtin.file:
+    path: /opt/postgres-image
+    state: directory
+    mode: "0755"
+
+- name: Install backup image definition
+  ansible.builtin.copy:
+    src: docker/Dockerfile
+    dest: /opt/postgres-image/Dockerfile
+    mode: "0644"
+  register: postgres_dockerfile
+
+- name: Build PostgreSQL image with pgBackRest
+  community.docker.docker_image:
+    name: "local/postgres-backrest:{{ postgres_major_version }}"
+    source: build
+    force_source: "{{ postgres_dockerfile.changed or postgres_pull_policy == 'always' }}"
+    build:
+      path: /opt/postgres-image
+      pull: "{{ postgres_pull_policy == 'always' }}"
+      nocache: "{{ postgres_pull_policy == 'always' }}"
+      args:
+        POSTGRES_MAJOR: "{{ postgres_major_version }}"
+
+- name: Read the image PostgreSQL user ID
+  ansible.builtin.command:
+    argv: [docker, run, --rm, --entrypoint, id, "local/postgres-backrest:{{ postgres_major_version }}", -u, postgres]
+  register: postgres_image_uid
+  changed_when: false
+
+- name: Create private pgBackRest configuration directory
+  ansible.builtin.file:
+    path: /etc/pgbackrest
+    state: directory
+    owner: "{{ postgres_image_uid.stdout }}"
+    mode: "0700"
+
+- name: Configure encrypted transport to S3 backup repository
+  ansible.builtin.template:
+    src: pgbackrest.conf.j2
+    dest: /etc/pgbackrest/pgbackrest.conf
+    owner: "{{ postgres_image_uid.stdout }}"
+    mode: "0600"
+  no_log: true

@@ -1,0 +1,38 @@
+---
+- name: Initialize or validate backup stanza
+  ansible.builtin.command:
+    argv: [docker, exec, --user, postgres, postgres, pgbackrest, --stanza=main, stanza-create]
+  changed_when: false
+
+- name: Verify S3 access and WAL archiving
+  ansible.builtin.command:
+    argv: [docker, exec, --user, postgres, postgres, pgbackrest, --stanza=main, check]
+  changed_when: false
+
+- name: Read completed physical backups
+  ansible.builtin.command:
+    argv: [docker, exec, --user, postgres, postgres, pgbackrest, --stanza=main, --output=json, info]
+  register: postgres_backup_info
+  changed_when: false
+
+- name: Take initial full backup when repository has none
+  ansible.builtin.command:
+    argv: [docker, exec, --user, postgres, postgres, pgbackrest, --stanza=main, --type=full, backup]
+  when: (postgres_backup_info.stdout | from_json)[0].backup | length == 0
+  changed_when: true
+
+- name: Schedule weekly full S3 backup
+  ansible.builtin.cron:
+    name: PostgreSQL S3 full backup
+    minute: "0"
+    hour: "2"
+    weekday: "0"
+    job: /usr/local/sbin/postgres-s3-backup full
+
+- name: Schedule daily differential S3 backup
+  ansible.builtin.cron:
+    name: PostgreSQL S3 differential backup
+    minute: "0"
+    hour: "2"
+    weekday: "1-6"
+    job: /usr/local/sbin/postgres-s3-backup diff

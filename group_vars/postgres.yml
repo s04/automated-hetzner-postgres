@@ -1,0 +1,49 @@
+---
+postgres_db: "{{ lookup('ansible.builtin.env', 'POSTGRES_DB') }}"
+postgres_user: "{{ lookup('ansible.builtin.env', 'POSTGRES_USER') }}"
+postgres_password: "{{ lookup('ansible.builtin.env', 'POSTGRES_PASSWORD') }}"
+# Keep 16 for existing installations. Major upgrades require dump/restore.
+postgres_major_version: "16"
+postgres_pull_policy: missing
+postgres_internal_port: 5432
+postgres_external_port: 54321
+postgres_data_dir: /var/lib/postgresql/data
+postgres_backup_dir: /var/backups/postgresql
+postgres_backup_retention_days: 7
+postgres_shm_size: 256M
+
+# Conservative starting points for a dedicated VM, not workload-specific optimization.
+postgres_autotune: true
+postgres_max_connections: 100
+postgres_shared_buffers_mb: "{{ (ansible_memtotal_mb * 0.25) | int }}"
+postgres_effective_cache_size_mb: "{{ (ansible_memtotal_mb * 0.65) | int }}"
+postgres_work_mem_mb: "{{ [1, [16, (ansible_memtotal_mb * 0.05 / (postgres_max_connections | int)) | int] | min] | max }}"
+postgres_maintenance_work_mem_mb: "{{ [512, [64, (ansible_memtotal_mb * 0.05) | int] | max] | min }}"
+postgres_max_worker_processes: "{{ [8, ansible_processor_vcpus] | max }}"
+postgres_max_parallel_workers: "{{ [8, ansible_processor_vcpus] | min }}"
+postgres_max_parallel_workers_per_gather: "{{ [2, ansible_processor_vcpus] | min }}"
+postgres_max_wal_size: 2GB
+postgres_min_wal_size: 512MB
+postgres_checkpoint_timeout: 10min
+postgres_checkpoint_completion_target: 0.9
+postgres_archive_timeout: 300s
+
+# Off-server physical backups and continuous WAL archiving; bucket must already exist.
+postgres_s3_backup_enabled: false
+postgres_s3_bucket: "{{ lookup('ansible.builtin.env', 'S3_BUCKET') }}"
+postgres_s3_endpoint: "{{ lookup('ansible.builtin.env', 'S3_ENDPOINT') }}"
+postgres_s3_region: "{{ lookup('ansible.builtin.env', 'S3_REGION') | default('us-east-1', true) }}"
+postgres_s3_access_key: "{{ lookup('ansible.builtin.env', 'S3_ACCESS_KEY_ID') }}"
+postgres_s3_secret_key: "{{ lookup('ansible.builtin.env', 'S3_SECRET_ACCESS_KEY') }}"
+postgres_s3_uri_style: path
+postgres_s3_port: 443
+postgres_s3_verify_tls: true
+# A unique prefix per independent cluster; retain this prefix when restoring that cluster.
+postgres_s3_prefix: /postgres
+postgres_s3_retention_full: 2
+postgres_pgbackrest_process_max: 2
+postgres_allow_disable_s3: false
+# One-off disaster recovery only: destination must be empty and source must be stopped.
+postgres_restore_from_s3: false
+postgres_restore_target: "" # Optional timestamp with timezone; empty replays all available WAL.
+postgres_ready_timeout: 300

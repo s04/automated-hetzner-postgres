@@ -1,23 +1,99 @@
 ---
-- hosts: all
-  become: yes
-  vars:
-    postgres_db: "{{ lookup('community.general.env', 'POSTGRES_DB') }}"
-    postgres_user: "{{ lookup('community.general.env', 'POSTGRES_USER') }}"
-    postgres_password: "{{ lookup('community.general.env', 'POSTGRES_PASSWORD') }}"
-    postgres_internal_port: 5432
-    postgres_external_port: 54321
-    postgres_data_dir: "/var/lib/postgresql/data"
-    postgres_init_dir: "/docker-entrypoint-initdb.d"
-    keep_existing_data: false  # Set this to true if you want to keep existing data
+- name: Configure PostgreSQL server
+  hosts: postgres_servers
+  become: true
+  vars_files:
+    - group_vars/postgres.yml
+  pre_tasks:
+    - name: Validate deployment settings before changing the host
+      ansible.builtin.assert:
+        that:
+          - ansible_distribution == 'Ubuntu'
+          - ansible_distribution_release == 'noble'
+          - postgres_db | length > 0
+          - postgres_user | length > 0
+          - postgres_password | length >= 16
+          - postgres_external_port | int > 1024
+          - postgres_external_port | int < 65536
+          - postgres_backup_retention_days | int >= 1
+          - postgres_major_version | string in ['16', '17', '18']
+          - postgres_data_dir == '/var/lib/postgresql/data'
+          - postgres_backup_dir == '/var/backups/postgresql'
+        fail_msg: Check credentials (password >= 16 characters), Ubuntu 24.04, and supported settings.
+      no_log: true
+
+    - name: Validate tuning and backup configuration
+      ansible.builtin.assert:
+        that:
+          - postgres_max_connections | int >= 10
+          - postgres_max_connections | int <= 1000
+          - ansible_memtotal_mb | int >= 1024
+          - postgres_s3_retention_full | int >= 2
+          - postgres_s3_uri_style in ['path', 'host']
+          - postgres_s3_prefix is match('^/[a-zA-Z0-9/_-]+$')
+        fail_msg: Check connection limits, memory (minimum 1 GiB), retention, and S3 prefix.
+
+    - name: Validate S3 credentials when off-server backups are enabled
+      ansible.builtin.assert:
+        that:
+          - postgres_s3_bucket | length > 0
+          - postgres_s3_endpoint is match('^[a-zA-Z0-9.-]+$')
+          - postgres_s3_region | length > 0
+          - postgres_s3_access_key | length > 0
+          - postgres_s3_secret_key | length > 0
+          - "'\n' not in postgres_s3_access_key"
+          - "'\n' not in postgres_s3_secret_key"
+      when: postgres_s3_backup_enabled | bool
+      no_log: true
+
+    - name: Inspect recovery directory existence
+      ansible.builtin.stat:
+        path: "{{ postgres_data_dir }}"
+      register: postgres_restore_directory
+      when: postgres_restore_from_s3 | bool
+
+    - name: Inspect recovery destination
+      ansible.builtin.find:
+        paths: "{{ postgres_data_dir }}"
+        file_type: any
+        hidden: true
+      register: postgres_restore_files
+      when: postgres_restore_from_s3 | bool and postgres_restore_directory.stat.exists
+
+    - name: Refuse recovery over existing files
+      ansible.builtin.assert:
+        that:
+          - postgres_s3_backup_enabled | bool
+          - postgres_restore_files.matched | default(0) == 0
+          - postgres_restore_files.skipped_paths | default({}) | length == 0
+        fail_msg: S3 recovery requires an empty readable data directory and enabled S3 backups. Use a new server.
+      when: postgres_restore_from_s3 | bool
+
+    - name: Check for an existing database
+      ansible.builtin.stat:
+        path: "{{ postgres_data_dir }}/PG_VERSION"
+      register: pg_version_file
+
+    - name: Inspect existing database version
+      ansible.builtin.slurp:
+        src: "{{ postgres_data_dir }}/PG_VERSION"
+      register: existing_pg_version
+      when: pg_version_file.stat.exists
+
+    - name: Refuse an in-place major version upgrade
+      ansible.builtin.assert:
+        that:
+          - existing_pg_version.content | b64decode | trim == postgres_major_version | string
+        fail_msg: Existing data requires its original PostgreSQL major version. Follow docs/operations.md to migrate.
+      when: existing_pg_version.content is defined
   tasks:
-    - name: Update and upgrade apt packages
-      apt:
-        update_cache: yes
-        upgrade: dist
+    - name: Refresh apt package cache
+      ansible.builtin.apt:
+        update_cache: true
+        cache_valid_time: 3600
 
     - name: Remove conflicting Docker and container-related packages
-      apt:
+      ansible.builtin.apt:
         name:
           - docker.io
           - docker-doc
@@ -29,14 +105,16 @@
         state: absent
 
     - name: Install Docker prerequisites
-      apt:
+      ansible.builtin.apt:
         name:
           - ca-certificates
           - curl
+          - python3-requests
+          - cron
         state: present
 
     - name: Create keyrings directory
-      file:
+      ansible.builtin.file:
         path: /etc/apt/keyrings
         state: directory
         mode: "0755"
@@ -49,12 +127,15 @@
 
     - name: Add Docker apt repository
       ansible.builtin.apt_repository:
-        repo: "deb [arch={{ ansible_architecture | replace('x86_64', 'amd64') | replace('aarch64', 'arm64') }} signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu {{ ansible_distribution_release }} stable"
+        repo: >-
+          deb [arch={{ ansible_architecture | replace('x86_64', 'amd64') | replace('aarch64', 'arm64') }}
+          signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu
+          {{ ansible_distribution_release }} stable
         filename: docker
         state: present
 
     - name: Install Docker packages
-      apt:
+      ansible.builtin.apt:
         name:
           - docker-ce
           - docker-ce-cli
@@ -62,131 +143,200 @@
           - docker-buildx-plugin
           - docker-compose-plugin
         state: present
-        update_cache: yes
+        update_cache: true
 
-    - name: Create Docker network
-      docker_network:
-        name: postgres_network
-
-    - name: Check if PostgreSQL data directory is empty
-      find:
-        paths: "{{ postgres_data_dir }}"
-        file_type: any
-      register: postgres_data_files
-
-    - name: Clear PostgreSQL data directory if starting fresh
-      file:
-        path: "{{ postgres_data_dir }}"
-        state: absent
-      when: not keep_existing_data and postgres_data_files.matched > 0
-
-    - name: Recreate empty PostgreSQL data directory if starting fresh
-      file:
+    - name: Create persistent PostgreSQL data directory without changing existing ownership
+      ansible.builtin.file:
         path: "{{ postgres_data_dir }}"
         state: directory
         mode: '0700'
-        owner: "1000"  # This is typically the UID for the postgres user in the container
-        group: "1000"
-      when: not keep_existing_data
+
+    - name: Ensure Docker is running
+      ansible.builtin.systemd:
+        name: docker
+        state: started
+        enabled: true
+
+    - name: Create Docker network
+      community.docker.docker_network:
+        name: postgres_network
+
+    - name: Inspect current container before changing backup mode
+      community.docker.docker_container_info:
+        name: postgres
+      register: postgres_current_container
+
+    - name: Require explicit opt-out before disabling active WAL archiving
+      ansible.builtin.assert:
+        that:
+          - >-
+            postgres_s3_backup_enabled | bool or postgres_allow_disable_s3 | bool
+            or '/etc/pgbackrest' not in
+            (postgres_current_container.container.Mounts | default([]) | map(attribute='Destination') | list)
+        fail_msg: S3 backups are active. Keep the same config file or explicitly set postgres_allow_disable_s3=true.
+      when: postgres_current_container.exists
+
+    - name: Prepare S3 backup support
+      ansible.builtin.include_tasks: tasks/pgbackrest-prepare.yml
+      when: postgres_s3_backup_enabled | bool
+
+    - name: Restore into a new server before starting PostgreSQL
+      ansible.builtin.include_tasks: tasks/pgbackrest-restore.yml
+      when: postgres_restore_from_s3 | bool
+
+    - name: Assemble PostgreSQL configuration
+      ansible.builtin.set_fact:
+        postgres_runtime_options: >-
+          {{ ['postgres', '-c', 'listen_addresses=*', '-c', 'password_encryption=scram-sha-256']
+          + (['-c', 'shared_buffers=' ~ postgres_shared_buffers_mb ~ 'MB',
+              '-c', 'effective_cache_size=' ~ postgres_effective_cache_size_mb ~ 'MB',
+              '-c', 'work_mem=' ~ postgres_work_mem_mb ~ 'MB',
+              '-c', 'maintenance_work_mem=' ~ postgres_maintenance_work_mem_mb ~ 'MB',
+              '-c', 'max_connections=' ~ postgres_max_connections,
+              '-c', 'max_worker_processes=' ~ postgres_max_worker_processes,
+              '-c', 'max_parallel_workers=' ~ postgres_max_parallel_workers,
+              '-c', 'max_parallel_workers_per_gather=' ~ postgres_max_parallel_workers_per_gather,
+              '-c', 'max_wal_size=' ~ postgres_max_wal_size,
+              '-c', 'min_wal_size=' ~ postgres_min_wal_size,
+              '-c', 'checkpoint_timeout=' ~ postgres_checkpoint_timeout,
+              '-c', 'checkpoint_completion_target=' ~ postgres_checkpoint_completion_target,
+              '-c', 'wal_compression=on'] if postgres_autotune | bool else [])
+          + (['-c', 'archive_mode=on', '-c', 'archive_timeout=' ~ postgres_archive_timeout,
+              '-c', 'archive_command=pgbackrest --stanza=main archive-push %p'] if postgres_s3_backup_enabled | bool else []) }}
 
     - name: Run PostgreSQL container
-      docker_container:
+      community.docker.docker_container:
         name: postgres
-        image: postgres:16.8
-        state: started
+        image: >-
+          {{ 'local/postgres-backrest:' ~ postgres_major_version if postgres_s3_backup_enabled | bool
+          else 'postgres:' ~ postgres_major_version ~ '-bookworm' }}
+        pull: "{{ 'never' if postgres_s3_backup_enabled | bool else postgres_pull_policy }}"
+        state: healthy
+        healthy_wait_timeout: "{{ postgres_ready_timeout }}"
         restart_policy: always
         networks:
           - name: postgres_network
         env:
+          PGDATA: /var/lib/postgresql/data
           POSTGRES_DB: "{{ postgres_db }}"
           POSTGRES_USER: "{{ postgres_user }}"
           POSTGRES_PASSWORD: "{{ postgres_password }}"
           POSTGRES_HOST_AUTH_METHOD: "scram-sha-256"
         ports:
           - "127.0.0.1:{{ postgres_external_port }}:{{ postgres_internal_port }}"
-        volumes:
-          - "{{ postgres_data_dir }}:/var/lib/postgresql/data"
-          - "{{ postgres_init_dir }}:/docker-entrypoint-initdb.d"
-        command:
-          - "postgres"
-          - "-c"
-          - "listen_addresses=*"
+        volumes: >-
+          {{ [postgres_data_dir ~ ':/var/lib/postgresql/data']
+          + (['/etc/pgbackrest:/etc/pgbackrest:ro'] if postgres_s3_backup_enabled | bool else []) }}
+        shm_size: "{{ postgres_shm_size }}"
+        log_driver: json-file
+        log_options:
+          max-size: "10m"
+          max-file: "3"
+        healthcheck:
+          test: ["CMD-SHELL", 'pg_isready -h 127.0.0.1 -U "$POSTGRES_USER" -d "$POSTGRES_DB"']
+          interval: 10s
+          timeout: 5s
+          retries: 5
+          start_period: 30s
+        command: "{{ postgres_runtime_options }}"
+      no_log: true
 
     - name: Install UFW
-      apt:
+      ansible.builtin.apt:
         name: ufw
         state: present
 
     - name: Allow SSH through UFW
-      ufw:
+      community.general.ufw:
         rule: allow
         port: "22"
         proto: tcp
 
-    - name: Allow custom PostgreSQL port through UFW
-      ufw:
-        rule: allow
-        port: "{{ postgres_external_port }}"
-        proto: tcp
-
     - name: Enable UFW
-      ufw:
+      community.general.ufw:
         state: enabled
         policy: deny
 
     - name: Install fail2ban
-      apt:
+      ansible.builtin.apt:
         name: fail2ban
         state: present
 
     - name: Start and enable fail2ban
-      systemd:
+      ansible.builtin.systemd:
         name: fail2ban
         state: started
-        enabled: yes
+        enabled: true
 
-    - name: Create backup directory
-      file:
-        path: "{{ postgres_data_dir }}/backups"
+    - name: Create backup directory outside the database volume
+      ansible.builtin.file:
+        path: "{{ postgres_backup_dir }}"
         state: directory
         mode: "0700"
         owner: root
         group: root
 
+    - name: Install atomic compressed backup script
+      ansible.builtin.template:
+        src: postgres-backup.sh.j2
+        dest: /usr/local/sbin/postgres-backup
+        owner: root
+        group: root
+        mode: "0700"
+
     - name: Set up daily PostgreSQL backups
-      cron:
+      ansible.builtin.cron:
         name: "Daily PostgreSQL backup"
         minute: "0"
         hour: "1"
         user: root
-        job: "docker exec postgres pg_dumpall -U {{ postgres_user }} > {{ postgres_data_dir }}/backups/postgres_$(date +\\%Y\\%m\\%d).sql"
+        job: /usr/local/sbin/postgres-backup
 
-    - name: Rotate PostgreSQL backups
-      cron:
+    - name: Remove legacy backup rotation job
+      ansible.builtin.cron:
         name: "Rotate PostgreSQL backups"
-        minute: "30"
-        hour: "1"
         user: root
-        job: "find {{ postgres_data_dir }}/backups -name 'postgres_*.sql' -mtime +7 -delete"
+        state: absent
 
-    - name: Disable SSH password authentication
-      lineinfile:
-        path: /etc/ssh/sshd_config
-        regexp: '^#?PasswordAuthentication'
-        line: 'PasswordAuthentication no'
-      notify: Restart SSH
+    - name: Install manual S3 backup command
+      ansible.builtin.template:
+        src: postgres-s3-backup.sh.j2
+        dest: /usr/local/sbin/postgres-s3-backup
+        mode: "0700"
+      when: postgres_s3_backup_enabled | bool
 
-    - name: Determine SSH service name
-      command: systemctl list-unit-files --type=service
-      register: service_list
-      changed_when: false
+    - name: Install isolated S3 restore drill
+      ansible.builtin.template:
+        src: postgres-restore-drill.sh.j2
+        dest: /usr/local/sbin/postgres-restore-drill
+        mode: "0700"
+      when: postgres_s3_backup_enabled | bool
 
-    - name: Set SSH service fact
-      set_fact:
-        ssh_service_name: "{{ 'ssh' if 'ssh.service' in service_list.stdout else 'sshd' }}"
+    - name: Configure and verify S3 backups
+      ansible.builtin.include_tasks: tasks/pgbackrest-backups.yml
+      when: postgres_s3_backup_enabled | bool
+
+    - name: Remove S3 schedules when disabled
+      ansible.builtin.cron:
+        name: "{{ item }}"
+        state: absent
+      loop:
+        - PostgreSQL S3 full backup
+        - PostgreSQL S3 differential backup
+      when: not postgres_s3_backup_enabled | bool
+
+    - name: Disable SSH password and interactive authentication
+      ansible.builtin.copy:
+        dest: /etc/ssh/sshd_config.d/00-postgres.conf
+        content: |
+          PasswordAuthentication no
+          KbdInteractiveAuthentication no
+        mode: "0644"
+        validate: /usr/sbin/sshd -t -f %s
+      notify: Reload SSH
 
   handlers:
-    - name: Restart SSH
-      service:
-        name: "{{ ssh_service_name }}"
-        state: restarted
+    - name: Reload SSH
+      ansible.builtin.service:
+        name: ssh
+        state: reloaded
