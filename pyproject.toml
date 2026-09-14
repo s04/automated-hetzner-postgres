@@ -6,8 +6,8 @@ requires-python = ">=3.11"
 
 [dependency-groups]
 dev = [
-    "ansible-core>=2.18,<2.19",
-    "ansible-lint>=25,<26",
+    "ansible-core>=2.18,<2.20",
+    "ansible-lint>=25,<27",
 ]
 
 [tool.uv]
