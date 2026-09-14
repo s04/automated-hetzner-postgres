@@ -31,16 +31,16 @@ This is a **single Ubuntu 24.04 machine**, not a highly available service. You s
 
 ## Quick start
 
-You need a Hetzner project/API token with read/write access, Terraform >= 1.5, Python 3.11+, Make, and an SSH key. Provisioning and object storage incur provider charges. Run these commands from the repository root.
+You need a Hetzner project/API token with read/write access, Terraform >= 1.5, [uv](https://docs.astral.sh/uv/getting-started/installation/), Make, and an SSH key. Provisioning and object storage incur provider charges. Run these commands from the repository root.
 
 ### 1. Install dependencies
 
 ```bash
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -r requirements-dev.txt
-ansible-galaxy collection install -r requirements.yml
+uv sync --frozen
+uv run --frozen ansible-galaxy collection install -r requirements.yml
 ```
+
+`uv` manages Python 3.12 and the locked development environment; no manual virtualenv activation is needed.
 
 ### 2. Set your configuration
 

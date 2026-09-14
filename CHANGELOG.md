@@ -14,6 +14,8 @@
 
 ### Added
 
+- Locked uv development environment shared by Make, CI, and setup instructions.
+
 - MIT license, scheduled weekly validation, and monthly dependency-update PRs.
 
 - Optional Terraform provisioning of private Hetzner Object Storage buckets, isolated bucket state, and automatic Ansible configuration export.

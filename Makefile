@@ -4,7 +4,7 @@ TF_DIR ?= $(CURDIR)/terraform
 BUCKET_TF_DIR ?= $(CURDIR)/terraform/object-storage
 ANSIBLE_ARGS ?=
 CONFIG_ARGS := $(if $(wildcard config.yml),-e @config.yml,) $(if $(wildcard backup.generated.yml),-e @backup.generated.yml,)
-PLAYBOOK = TF_BIN="$(TF)" TF_DIR="$(TF_DIR)" ansible-playbook -i scripts/inventory.py $(CONFIG_ARGS) $(ANSIBLE_ARGS)
+PLAYBOOK = TF_BIN="$(TF)" TF_DIR="$(TF_DIR)" uv run --frozen ansible-playbook -i scripts/inventory.py $(CONFIG_ARGS) $(ANSIBLE_ARGS)
 
 .PHONY: help bucket bucket-config init plan deploy configure status backup s3-backup restore-drill upgrade tunnel check
 help:
@@ -51,11 +51,13 @@ upgrade:
 tunnel:
 	ssh -N -o ExitOnForwardFailure=yes -L 127.0.0.1:54321:127.0.0.1:54321 root@"$$($(TF) -chdir="$(TF_DIR)" output -raw server_ip)"
 check:
+	uv lock --check
+	uv sync --frozen
 	$(TF) -chdir="$(TF_DIR)" fmt -check -recursive
 	$(TF) -chdir="$(TF_DIR)" init -backend=false -input=false
 	$(TF) -chdir="$(TF_DIR)" validate
 	$(TF) -chdir="$(BUCKET_TF_DIR)" init -backend=false -input=false
 	$(TF) -chdir="$(BUCKET_TF_DIR)" validate
-	ansible-lint playbook.yaml operations.yml tasks/*.yml
-	ansible-playbook -i inventory.ini playbook.yaml --syntax-check
-	python -m unittest discover -s tests -v
+	uv run --frozen ansible-lint playbook.yaml operations.yml tasks/*.yml
+	uv run --frozen ansible-playbook -i inventory.ini playbook.yaml --syntax-check
+	uv run --frozen python -m unittest discover -s tests -v

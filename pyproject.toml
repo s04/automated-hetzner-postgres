@@ -1,0 +1,14 @@
+[project]
+name = "automated-hetzner-postgres"
+version = "0.1.0"
+description = "Terraform and Ansible automation for a single Hetzner PostgreSQL server"
+requires-python = ">=3.11"
+
+[dependency-groups]
+dev = [
+    "ansible-core>=2.18,<2.19",
+    "ansible-lint>=25,<26",
+]
+
+[tool.uv]
+package = false
